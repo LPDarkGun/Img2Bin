@@ -62,7 +62,7 @@ export default function Home() {
       const originalH = img.naturalHeight;
       
       // Fixed target output size (square). Adjust as you like.
-      const targetSize = 100;
+      const targetSize = 40;
       let w = targetSize;
       let h = targetSize;
 
