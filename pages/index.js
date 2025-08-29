@@ -15,7 +15,7 @@ export default function Home() {
   const [copied, setCopied] = useState(false);          // "Copy all" feedback
   const [pastedText, setPastedText] = useState("");     // raw text the user pastes for rendering back to pixels
   const [previewUrl, setPreviewUrl] = useState("");     // data URL preview of the processed image
-
+  const [targetNumber, setTargetNumber] = useState(50)
   // Convert 8-bit per channel RGB (0–255) -> packed 9-bit 3-3-3 binary string.
   // We quantize each channel to 3 bits (0–7), pack them into 9 bits (RRR GGG BBB), and return "#########" text.
   const rgbTo9Bit = (r, g, b) => {
@@ -62,7 +62,7 @@ export default function Home() {
       const originalH = img.naturalHeight;
       
       // Fixed target output size (square). Adjust as you like.
-      const targetSize = 40;
+      const targetSize = targetNumber;
       let w = targetSize;
       let h = targetSize;
 
@@ -212,6 +212,31 @@ export default function Home() {
             {/* Image upload + stats */}
             <div className="rounded-lg border border-gray-200 bg-white p-4">
               <label className="block">
+                <div className="mt-4">
+  <label className="block text-sm font-medium mb-1">
+    Target Size (pixels)
+  </label>
+  <input
+    type="range"
+    min={50}
+    max={150}
+    value={targetNumber}
+    onChange={(e) => {
+      const newVal = Number(e.target.value);
+      setTargetNumber(newVal);
+
+      // If image already uploaded, reprocess with new size
+      if (fileRef.current?.files?.[0]) {
+        handleFile(fileRef.current.files[0]);
+      }
+    }}
+    className="w-full"
+  />
+  <div className="text-xs text-gray-600 mt-1">
+    {targetNumber} × {targetNumber} pixels
+  </div>
+</div>
+
                 <span className="text-sm font-medium">Select image</span>
                 <input
                   ref={fileRef}
