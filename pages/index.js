@@ -15,7 +15,7 @@ export default function Home() {
   const [copied, setCopied] = useState(false);          // "Copy all" feedback
   const [pastedText, setPastedText] = useState("");     // raw text the user pastes for rendering back to pixels
   const [previewUrl, setPreviewUrl] = useState("");     // data URL preview of the processed image
-  const [targetNumber, setTargetNumber] = useState(50)
+  const [targetNumber, setTargetNumber] = useState(20)
   // Convert 8-bit per channel RGB (0–255) -> packed 9-bit 3-3-3 binary string.
   // We quantize each channel to 3 bits (0–7), pack them into 9 bits (RRR GGG BBB), and return "#########" text.
   const rgbTo9Bit = (r, g, b) => {
