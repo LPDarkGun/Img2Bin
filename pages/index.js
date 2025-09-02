@@ -218,7 +218,7 @@ export default function Home() {
   </label>
   <input
     type="range"
-    min={50}
+    min={20}
     max={150}
     value={targetNumber}
     onChange={(e) => {
