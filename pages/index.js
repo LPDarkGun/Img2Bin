@@ -1,13 +1,14 @@
 // app/page.jsx
 "use client";
 
-import { useRef, useState, useMemo } from "react";
+import { useRef, useState, useMemo, useEffect } from "react";
 
 export default function Home() {
   // ----- Refs for DOM nodes we need to access imperatively -----
   const fileRef = useRef(null);      // <input type="file"> element
   const canvasRef = useRef(null);    // hidden canvas used to sample pixels
   const pasteArtRef = useRef(null);  // canvas used to render pasted 9-bit text
+  const pasteZoneRef = useRef(null); // optional focusable area for paste
 
   // ----- UI/processing state -----
   const [bits, setBits] = useState([]);                 // flat array of "#########" 9-bit binary strings (one per pixel)
@@ -15,74 +16,53 @@ export default function Home() {
   const [copied, setCopied] = useState(false);          // "Copy all" feedback
   const [pastedText, setPastedText] = useState("");     // raw text the user pastes for rendering back to pixels
   const [previewUrl, setPreviewUrl] = useState("");     // data URL preview of the processed image
-  const [targetNumber, setTargetNumber] = useState(20)
+  const [targetNumber, setTargetNumber] = useState(20); // target width/height in pixels
+
   // Convert 8-bit per channel RGB (0–255) -> packed 9-bit 3-3-3 binary string.
-  // We quantize each channel to 3 bits (0–7), pack them into 9 bits (RRR GGG BBB), and return "#########" text.
   const rgbTo9Bit = (r, g, b) => {
-    // Quantize 0–255 to 0–7 by scaling, then rounding to nearest
     const r3 = Math.round((r / 255) * 7);
     const g3 = Math.round((g / 255) * 7);
     const b3 = Math.round((b / 255) * 7);
-    // Pack 3x3-bit channels into a single 9-bit int: R at bits 8..6, G at 5..3, B at 2..0
     const packed = (r3 << 6) | (g3 << 3) | b3;
-    // Return as 9-character binary string, zero-padded on the left
     return packed.toString(2).padStart(9, "0");
   };
 
   // Convert a 9-bit "#########" string back to 8-bit RGB.
-  // This reverses the packing and expands 3 bits (0–7) back to 0–255 by scaling.
   const bin9ToRgb = (bin) => {
-    // Parse binary string to integer
     const val = parseInt(bin, 2);
-    // Extract channels (mirror of packing above)
-    const r3 = (val >> 6) & 0b111; // top 3 bits
-    const g3 = (val >> 3) & 0b111; // middle 3 bits
-    const b3 = val & 0b111;        // bottom 3 bits
-    
-    // Expand quantized values from 0–7 back to 0–255 (simple linear scaling)
+    const r3 = (val >> 6) & 0b111;
+    const g3 = (val >> 3) & 0b111;
+    const b3 = val & 0b111;
     const r = Math.round((r3 / 7) * 255);
     const g = Math.round((g3 / 7) * 255);
     const b = Math.round((b3 / 7) * 255);
-    
     return [r, g, b];
   };
 
-  // Handle an uploaded image file:
-  // - Load it into an <img>
-  // - Draw it onto a hidden canvas scaled to a target size
-  // - Read pixels, alpha-compose onto white, quantize to 3-3-3, and store as 9-bit strings
-  // - Snapshot a preview data URL for the UI
+  // Handle an uploaded/pasted image file
   const handleFile = async (file) => {
     if (!file) return;
 
     const img = new Image();
     img.onload = () => {
-      // Get original size (not strictly used beyond drawImage source dims)
       const originalW = img.naturalWidth;
       const originalH = img.naturalHeight;
-      
-      // Fixed target output size (square). Adjust as you like.
+
       const targetSize = targetNumber;
       let w = targetSize;
       let h = targetSize;
 
-      // Prepare hidden canvas
       const canvas = canvasRef.current;
-      const ctx = canvas.getContext("2d", { willReadFrequently: true }); // hint for frequent pixel reads
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
       canvas.width = w;
       canvas.height = h;
       ctx.clearRect(0, 0, w, h);
-      
-      // Draw original image scaled to the target canvas
-      // drawImage(sx, sy, sWidth, sHeight, dx, dy, dWidth, dHeight)
+
       ctx.drawImage(img, 0, 0, originalW, originalH, 0, 0, w, h);
 
-      // Read back pixels (RGBA for the whole canvas)
       const { data } = ctx.getImageData(0, 0, w, h);
-      // Pre-allocate output array of length w*h
       const out = new Array(w * h);
 
-      // Loop pixels row-major; i points to RGBA in the flat Uint8ClampedArray
       for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
           const i = (y * w + x) * 4;
@@ -91,8 +71,6 @@ export default function Home() {
             b = data[i + 2],
             a = data[i + 3];
 
-          // If there’s transparency, composite over white background:
-          // out = src * alpha + white * (1 - alpha)
           if (a < 255) {
             const alpha = a / 255;
             r = Math.round(r * alpha + 255 * (1 - alpha));
@@ -100,57 +78,90 @@ export default function Home() {
             b = Math.round(b * alpha + 255 * (1 - alpha));
           }
 
-          // Convert to a 9-bit string and store in flat array
           out[y * w + x] = rgbTo9Bit(r, g, b);
         }
       }
 
-      // Commit state for UI
       setBits(out);
       setDims({ w, h });
       setCopied(false);
-      // Save a data URL preview (so we can display it as an <img>)
       setPreviewUrl(canvas.toDataURL());
     };
-    
-    // Basic load error feedback
+
     img.onerror = () => alert("Could not load that image. Try a different file.");
-    // Create a temporary object URL so <img> can load the uploaded file
     img.src = URL.createObjectURL(file);
   };
 
-  // Memoized string view of the 9-bit array:
-  // - Joins each row’s binary codes with spaces
-  // - Joins rows with newlines
+  // Helper: extract first image file from a DataTransfer / Clipboard
+  const extractImageFile = (itemsOrFiles) => {
+    // items (ClipboardEvent) may be DataTransferItemList; fallback to FileList
+    const list = itemsOrFiles;
+    if (!list) return null;
+
+    // Prefer items if present (so we can filter by type)
+    if ("0" in list && list[0]?.kind !== undefined) {
+      for (const it of list) {
+        if (it.kind === "file" && it.type.startsWith("image/")) {
+          const f = it.getAsFile();
+          if (f) return f;
+        }
+      }
+    } else {
+      // Looks like a FileList
+      for (const f of list) {
+        if (f && f.type?.startsWith?.("image/")) return f;
+      }
+    }
+    return null;
+  };
+
+  // PASTE support (paste anywhere on the page)
+  useEffect(() => {
+    const onPaste = (e) => {
+      const file = extractImageFile(e.clipboardData?.items || e.clipboardData?.files);
+      if (file) {
+        e.preventDefault();
+        handleFile(file);
+      }
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, []);
+
+  // Optional: make the paste zone focus by default for better UX
+  useEffect(() => {
+    pasteZoneRef.current?.focus();
+  }, []);
+
+  // Reprocess if the user changes the target size and a file is already chosen
+  useEffect(() => {
+    if (fileRef.current?.files?.[0]) {
+      handleFile(fileRef.current.files[0]);
+    }
+  }, [targetNumber]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Memoized string view of the 9-bit array
   const textArt = useMemo(() => {
     if (!dims.w || !dims.h || bits.length === 0) return "";
     const lines = [];
     for (let y = 0; y < dims.h; y++) {
-      const row = bits.slice(y * dims.w, (y + 1) * dims.w).join(" "); // "######### ######### ..."
+      const row = bits.slice(y * dims.w, (y + 1) * dims.w).join(" ");
       lines.push(row);
     }
-    return lines.join("\n"); // each line = one image row
+    return lines.join("\n");
   }, [bits, dims]);
 
-  // Copy the entire 9-bit text to clipboard and flash "Copied!"
   const copyAll = async () => {
     try {
       await navigator.clipboard.writeText(textArt);
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
-    } catch {
-      // Ignore clipboard errors (permissions, etc.)
-    }
+    } catch {}
   };
 
-  // Parse pasted 9-bit text and render it as pixels on the visible "paste" canvas.
-  // - Splits by lines (rows), then spaces (columns)
-  // - Validates tokens as 9-bit binary; invalid/missing -> white
-  // - Converts tokens back to RGB and writes an ImageData for display
+  // Parse pasted 9-bit text -> render back to pixels
   const renderFromPaste = () => {
     if (!pastedText.trim()) return;
-    
-    // rows: string[][] where each inner array is tokens for that row
     const rows = pastedText
       .trim()
       .split(/\r?\n/)
@@ -158,35 +169,26 @@ export default function Home() {
       .map((r) => r.trim().split(/\s+/).filter(Boolean));
 
     if (rows.length === 0) return;
-    
     const height = rows.length;
     const width = rows[0]?.length || 0;
-    
     if (width === 0) return;
 
-    // Prepare output canvas sized to the text grid
     const canvas = pasteArtRef.current;
     const ctx = canvas.getContext("2d");
     canvas.width = width;
     canvas.height = height;
-    
-    // Allocate image buffer for width*height pixels
+
     const imgData = ctx.createImageData(width, height);
 
-    // Fill pixels from tokens
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         const code = rows[y]?.[x];
         let r, g, b;
-        
-        // If token looks like exactly 9 binary digits, decode; else white
         if (code && /^[01]{9}$/.test(code)) {
           [r, g, b] = bin9ToRgb(code);
         } else {
           r = g = b = 255;
         }
-
-        // Write RGBA into the flat buffer (opaque)
         const i = (y * width + x) * 4;
         imgData.data[i] = r;
         imgData.data[i + 1] = g;
@@ -195,7 +197,6 @@ export default function Home() {
       }
     }
 
-    // Paint to the canvas
     ctx.putImageData(imgData, 0, 0);
   };
 
@@ -209,45 +210,57 @@ export default function Home() {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* Left column: uploader, preview, paste->render */}
           <section className="lg:col-span-8 space-y-4">
-            {/* Image upload + stats */}
-            <div className="rounded-lg border border-gray-200 bg-white p-4">
-              <label className="block">
-                <div className="mt-4">
-  <label className="block text-sm font-medium mb-1">
-    Target Size (pixels)
-  </label>
-  <input
-    type="range"
-    min={20}
-    max={150}
-    value={targetNumber}
-    onChange={(e) => {
-      const newVal = Number(e.target.value);
-      setTargetNumber(newVal);
+            {/* Image upload + paste hint */}
+            <div
+              ref={pasteZoneRef}
+              tabIndex={0}
+              onPaste={(e) => {
+                // Works even if window listener is removed
+                const file = extractImageFile(e.clipboardData?.items || e.clipboardData?.files);
+                if (file) {
+                  e.preventDefault();
+                  handleFile(file);
+                }
+              }}
+              className="rounded-lg border border-dashed border-gray-300 bg-white p-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-sm font-medium">Select or paste image</div>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Click <em>Select image</em>, or paste with <kbd>Ctrl</kbd>+<kbd>V</kbd> (⌘+V on Mac).
+                  </p>
+                </div>
 
-      // If image already uploaded, reprocess with new size
-      if (fileRef.current?.files?.[0]) {
-        handleFile(fileRef.current.files[0]);
-      }
-    }}
-    className="w-full"
-  />
-  <div className="text-xs text-gray-600 mt-1">
-    {targetNumber} × {targetNumber} pixels
-  </div>
-</div>
+                <label className="block">
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    accept="image/*"
+                    className="mt-2 block rounded border border-gray-300 bg-white px-3 py-2 text-sm"
+                    onChange={(e) => handleFile(e.target.files?.[0])}
+                  />
+                </label>
+              </div>
 
-                <span className="text-sm font-medium">Select image</span>
+              <div className="mt-4">
+                <label className="block text-sm font-medium mb-1">
+                  Target Size (pixels)
+                </label>
                 <input
-                  ref={fileRef}
-                  type="file"
-                  accept="image/*"
-                  className="mt-2 block w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm"
-                  onChange={(e) => handleFile(e.target.files?.[0])} // kick off processing
+                  type="range"
+                  min={20}
+                  max={150}
+                  value={targetNumber}
+                  onChange={(e) => setTargetNumber(Number(e.target.value))}
+                  className="w-full"
                 />
-              </label>
+                <div className="text-xs text-gray-600 mt-1">
+                  {targetNumber} × {targetNumber} pixels
+                </div>
+              </div>
 
-              <div className="mt-4 text-sm flex gap-6">
+              <div className="mt-3 text-sm flex gap-6">
                 <p>
                   <strong>Output Dimensions:</strong>{" "}
                   {dims.w && dims.h ? `${dims.w}×${dims.h}` : "—"}
@@ -259,7 +272,7 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Processed image preview (uses hidden canvas data URL) */}
+            {/* Processed image preview */}
             {previewUrl ? (
               <div className="rounded-lg border border-gray-200 bg-white p-4">
                 <h3 className="text-sm font-medium mb-2">Preview (scaled to fit)</h3>
@@ -267,18 +280,18 @@ export default function Home() {
                   src={previewUrl}
                   alt="Processed preview"
                   className="rounded border border-gray-200 max-w-full"
-                  style={{ 
-                    width: 'auto', 
-                    height: 'auto',
-                    maxWidth: '500px',
-                    maxHeight: '500px',
-                    imageRendering: 'pixelated'
+                  style={{
+                    width: "auto",
+                    height: "auto",
+                    maxWidth: "500px",
+                    maxHeight: "500px",
+                    imageRendering: "pixelated",
                   }}
                 />
               </div>
             ) : (
               <div className="rounded-lg border border-gray-200 bg-white p-4 text-sm text-gray-500">
-                Upload an image to see preview.
+                Upload or paste an image to see preview.
               </div>
             )}
 
@@ -295,12 +308,12 @@ export default function Home() {
                 className="w-full min-h=[160px] font-mono text-xs rounded border border-gray-300 p-2 mb-3"
                 placeholder="Paste your 9-bit codes here (space-separated, one row per line)..."
                 value={pastedText}
-                onChange={(e) => setPastedText(e.target.value)} // keep textarea controlled
+                onChange={(e) => setPastedText(e.target.value)}
               />
 
               <button
-                onClick={renderFromPaste}                 // parse + draw onto pasteArtRef canvas
-                disabled={!pastedText.trim()}             // guard against empty input
+                onClick={renderFromPaste}
+                disabled={!pastedText.trim()}
                 className="px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Render Pixel Art
@@ -310,12 +323,12 @@ export default function Home() {
                 <canvas
                   ref={pasteArtRef}
                   className="border border-gray-300 rounded max-w-full"
-                  style={{ 
-                    width: 'auto', 
-                    height: 'auto',
-                    maxWidth: '400px',
-                    maxHeight: '400px',
-                    imageRendering: 'pixelated' // same 'pixel look' as preview
+                  style={{
+                    width: "auto",
+                    height: "auto",
+                    maxWidth: "400px",
+                    maxHeight: "400px",
+                    imageRendering: "pixelated",
                   }}
                 />
               </div>
@@ -328,7 +341,7 @@ export default function Home() {
               <div className="flex items-center justify-between mb-3">
                 <h2 className="text-lg font-semibold">Binary Code</h2>
                 <button
-                  onClick={copyAll}                        // write textArt to clipboard
+                  onClick={copyAll}
                   disabled={!textArt}
                   className="text-sm px-3 py-1.5 rounded border border-gray-300 disabled:opacity-50 hover:bg-gray-50 disabled:cursor-not-allowed"
                 >
@@ -340,15 +353,13 @@ export default function Home() {
                 Each row = image row; each 9-bit code = one pixel in 3-3-3 RGB format.
               </p>
 
-              {/* Read-only view of the generated text (one row per line) */}
               <textarea
                 className="w-full min-h-[320px] flex-1 font-mono text-xs rounded border border-gray-300 p-2 resize-none"
                 readOnly
                 value={textArt}
-                placeholder="Binary output will appear here after uploading an image..."
+                placeholder="Binary output will appear here after uploading or pasting an image..."
               />
 
-              {/* Small stats footer */}
               <div className="mt-3 text-xs text-gray-600 space-y-1">
                 <div className="flex justify-between">
                   <span>Rows:</span>
